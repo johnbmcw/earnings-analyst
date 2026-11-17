@@ -54,15 +54,20 @@ Use only information in the transcript. Do not invent figures.
 </transcript>"""
 
 
-def get_api_key():
-    """Return (key, error_message). Only one of them is set."""
-    if not ENV_FILE.exists():
-        return None, "No `.env` file found in the project folder. Create one containing `ANTHROPIC_API_KEY=your-key`."
-    load_dotenv(ENV_FILE)
-    key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-    if not key or not key.startswith("sk-ant-"):
-        return None, "`.env` exists but `ANTHROPIC_API_KEY` is missing or doesn't look like an Anthropic key (should start with `sk-ant-`)."
-    return key, None
+def load_credentials():
+    """Optional .env support. With no key, the SDK falls back to your `ant auth login` profile."""
+    if ENV_FILE.exists():
+        load_dotenv(ENV_FILE)
+    # An empty ANTHROPIC_API_KEY= line would take priority over the login profile, so drop it.
+    if not os.getenv("ANTHROPIC_API_KEY", "").strip():
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+
+
+AUTH_HELP = (
+    "Claude API authentication failed. Either run `ant auth login` in a terminal "
+    "(sign-ins expire; `ant auth status` shows yours), or put `ANTHROPIC_API_KEY=your-key` "
+    "in a `.env` file in the project folder. Then restart the app."
+)
 
 
 def normalize(text):
@@ -71,9 +76,10 @@ def normalize(text):
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
-def analyze(api_key, transcript):
+def analyze(transcript):
     """Send the transcript to Claude and return the parsed JSON analysis."""
-    client = anthropic.Anthropic(api_key=api_key)
+    # No api_key argument: the SDK uses ANTHROPIC_API_KEY if set, otherwise the `ant auth login` profile.
+    client = anthropic.Anthropic()
     response = client.messages.create(
         model=MODEL,
         max_tokens=16000,
@@ -94,22 +100,25 @@ def analyze(api_key, transcript):
 # ---------------- UI ----------------
 st.title("AI Earnings Call Analyst")
 
-api_key, key_error = get_api_key()
-if key_error:
-    st.warning(key_error + " The Analyze button stays disabled until then, so no API calls are made.")
+load_credentials()
 
 transcript = st.text_area("Paste an earnings call transcript", height=300)
 
-if st.button("Analyze", disabled=api_key is None):
+if st.button("Analyze"):
     if not transcript.strip():
         st.error("Paste a transcript first.")
         st.stop()
 
     with st.spinner("Asking Claude..."):
         try:
-            result = analyze(api_key, transcript)
-        except anthropic.AuthenticationError:
-            st.error("Your API key was rejected (invalid or revoked). Check the key in `.env`, then restart the app.")
+            result = analyze(transcript)
+        except anthropic.AuthenticationError:  # credentials found but rejected (401)
+            st.warning(AUTH_HELP)
+            st.stop()
+        except TypeError as e:  # SDK raises TypeError when it finds no credentials at all
+            if "authentication method" not in str(e):
+                raise  # a real bug, not a sign-in problem: show the full traceback
+            st.warning(AUTH_HELP)
             st.stop()
         except anthropic.APIStatusError as e:  # e.g. no credits, rate limit, server error
             st.error(f"API error ({e.status_code}): {e.message}")
